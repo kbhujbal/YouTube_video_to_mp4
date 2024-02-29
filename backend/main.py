@@ -63,53 +63,50 @@ async def get_video_info(video: VideoURL):
             if not info:
                 raise HTTPException(status_code=400, detail="Could not extract video information")
 
-            # Get available formats (video + audio combined)
+            # Get available formats
             formats = []
             seen_resolutions = set()
 
+            # First, try to find formats with both video and audio (usually lower quality)
             for f in info.get('formats', []):
-                # Only include formats that have both video and audio or are mp4
                 if f.get('vcodec') != 'none' and f.get('acodec') != 'none':
-                    resolution = f.get('resolution', 'unknown')
                     height = f.get('height')
-                    format_id = f.get('format_id')
-                    ext = f.get('ext', 'mp4')
-                    filesize = f.get('filesize') or f.get('filesize_approx', 0)
-
                     if height and height not in seen_resolutions:
                         seen_resolutions.add(height)
+                        filesize = f.get('filesize') or f.get('filesize_approx', 0)
                         formats.append({
-                            'format_id': format_id,
+                            'format_id': f.get('format_id'),
                             'resolution': f"{height}p",
-                            'ext': ext,
+                            'ext': f.get('ext', 'mp4'),
                             'filesize': filesize,
                             'filesize_mb': round(filesize / (1024 * 1024), 2) if filesize else None,
                             'fps': f.get('fps'),
                             'vcodec': f.get('vcodec', 'unknown')[:20],
                         })
 
+            # Also get video-only formats (usually higher quality)
+            # These will be merged with audio during download
+            video_formats = [f for f in info.get('formats', [])
+                           if f.get('vcodec') != 'none' and f.get('acodec') == 'none'
+                           and f.get('height') is not None]
+
+            for f in video_formats:
+                height = f.get('height')
+                if height and height not in seen_resolutions:
+                    seen_resolutions.add(height)
+                    filesize = f.get('filesize') or f.get('filesize_approx', 0)
+                    formats.append({
+                        'format_id': f.get('format_id'),
+                        'resolution': f"{height}p",
+                        'ext': 'mp4',
+                        'filesize': filesize,
+                        'filesize_mb': round(filesize / (1024 * 1024), 2) if filesize else 0,
+                        'fps': f.get('fps'),
+                        'vcodec': f.get('vcodec', 'unknown')[:20],
+                    })
+
             # Sort by resolution (height) in descending order
             formats.sort(key=lambda x: int(x['resolution'].replace('p', '')), reverse=True)
-
-            # If no combined formats found, suggest best video + audio merge
-            if not formats:
-                # Get best video-only formats
-                video_formats = [f for f in info.get('formats', []) if f.get('vcodec') != 'none' and f.get('acodec') == 'none']
-                for f in video_formats:
-                    height = f.get('height')
-                    if height and height not in seen_resolutions:
-                        seen_resolutions.add(height)
-                        formats.append({
-                            'format_id': f.get('format_id'),
-                            'resolution': f"{height}p",
-                            'ext': 'mp4',
-                            'filesize': f.get('filesize') or f.get('filesize_approx', 0),
-                            'filesize_mb': round((f.get('filesize') or f.get('filesize_approx', 0)) / (1024 * 1024), 2),
-                            'fps': f.get('fps'),
-                            'vcodec': f.get('vcodec', 'unknown')[:20],
-                            'needs_merge': True
-                        })
-                formats.sort(key=lambda x: int(x['resolution'].replace('p', '')), reverse=True)
 
             return {
                 'title': info.get('title', 'Unknown'),
