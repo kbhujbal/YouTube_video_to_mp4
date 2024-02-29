@@ -49,11 +49,18 @@ export default function Home() {
         url: url.trim()
       })
 
+      console.log('Video Info Response:', response.data)
+      console.log('Available formats:', response.data.formats)
+
       setVideoInfo(response.data)
-      if (response.data.formats.length > 0) {
+      if (response.data.formats && response.data.formats.length > 0) {
         setSelectedFormat(response.data.formats[0].format_id)
+        console.log('Selected format:', response.data.formats[0].format_id)
+      } else {
+        setError('No downloadable formats found for this video')
       }
     } catch (err: any) {
+      console.error('Error fetching video info:', err)
       setError(err.response?.data?.detail || 'Failed to fetch video information')
     } finally {
       setLoading(false)
@@ -142,7 +149,7 @@ export default function Home() {
                   id="url"
                   value={url}
                   onChange={(e) => setUrl(e.target.value)}
-                  onKeyPress={(e) => e.key === 'Enter' && fetchVideoInfo()}
+                  onKeyDown={(e) => e.key === 'Enter' && fetchVideoInfo()}
                   placeholder="https://www.youtube.com/watch?v=..."
                   className="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-gray-900"
                   disabled={loading}
