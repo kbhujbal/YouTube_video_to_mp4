@@ -2,13 +2,22 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
+from contextlib import asynccontextmanager
 import yt_dlp
 import os
 import re
 from pathlib import Path
 import uuid
+import urllib.parse
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    yield
+    # Shutdown
+    clean_old_files()
+
+app = FastAPI(lifespan=lifespan)
 
 # Configure CORS
 app.add_middleware(
@@ -52,8 +61,8 @@ async def get_video_info(video: VideoURL):
     """Get available video qualities for a YouTube URL"""
     try:
         ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
+            'quiet': False,
+            'no_warnings': False,
             'extract_flat': False,
         }
 
@@ -65,66 +74,78 @@ async def get_video_info(video: VideoURL):
 
             # Get available formats
             formats = []
-            seen_resolutions = set()
+            seen_resolutions = {}  # Changed to dict to store format_id for each resolution
 
-            # First, try to find formats with both video and audio (usually lower quality)
-            for f in info.get('formats', []):
-                if f.get('vcodec') != 'none' and f.get('acodec') != 'none':
-                    height = f.get('height')
-                    if height and height not in seen_resolutions:
-                        seen_resolutions.add(height)
-                        filesize = f.get('filesize') or f.get('filesize_approx', 0)
-                        formats.append({
-                            'format_id': f.get('format_id'),
-                            'resolution': f"{height}p",
-                            'ext': f.get('ext', 'mp4'),
-                            'filesize': filesize,
-                            'filesize_mb': round(filesize / (1024 * 1024), 2) if filesize else None,
-                            'fps': f.get('fps'),
-                            'vcodec': f.get('vcodec', 'unknown')[:20],
-                        })
+            all_formats = info.get('formats', [])
+            print(f"\n=== Processing {len(all_formats)} total formats ===")
 
-            # Also get video-only formats (usually higher quality)
-            # These will be merged with audio during download
-            video_formats = [f for f in info.get('formats', [])
-                           if f.get('vcodec') != 'none' and f.get('acodec') == 'none'
-                           and f.get('height') is not None]
-
-            for f in video_formats:
+            # Collect all video formats (both combined and video-only)
+            for f in all_formats:
+                vcodec = f.get('vcodec', 'none')
+                acodec = f.get('acodec', 'none')
                 height = f.get('height')
-                if height and height not in seen_resolutions:
-                    seen_resolutions.add(height)
+                format_id = f.get('format_id')
+                ext = f.get('ext', 'unknown')
+
+                # Skip audio-only or formats without height
+                if vcodec == 'none' or not height:
+                    continue
+
+                print(f"Format {format_id}: {height}p, vcodec={vcodec}, acodec={acodec}, ext={ext}")
+
+                # Prefer combined formats (video+audio) over video-only for the same resolution
+                if height not in seen_resolutions or (acodec != 'none' and seen_resolutions[height].get('has_audio') == False):
                     filesize = f.get('filesize') or f.get('filesize_approx', 0)
-                    formats.append({
-                        'format_id': f.get('format_id'),
+                    has_audio = acodec != 'none'
+
+                    seen_resolutions[height] = {
+                        'format_id': format_id,
                         'resolution': f"{height}p",
-                        'ext': 'mp4',
+                        'ext': ext if ext != 'unknown' else 'mp4',
                         'filesize': filesize,
-                        'filesize_mb': round(filesize / (1024 * 1024), 2) if filesize else 0,
+                        'filesize_mb': round(filesize / (1024 * 1024), 2) if filesize else None,
                         'fps': f.get('fps'),
-                        'vcodec': f.get('vcodec', 'unknown')[:20],
-                    })
+                        'vcodec': vcodec[:20] if vcodec else 'unknown',
+                        'has_audio': has_audio
+                    }
+
+            # Convert to list and remove the has_audio flag
+            formats = []
+            for height, fmt_data in seen_resolutions.items():
+                fmt = dict(fmt_data)
+                fmt.pop('has_audio', None)  # Remove internal flag
+                formats.append(fmt)
 
             # Sort by resolution (height) in descending order
             formats.sort(key=lambda x: int(x['resolution'].replace('p', '')), reverse=True)
+
+            print(f"\n=== Found {len(formats)} unique resolutions ===")
+            for fmt in formats:
+                print(f"  {fmt['resolution']}: format_id={fmt['format_id']}, {fmt['ext']}")
 
             return {
                 'title': info.get('title', 'Unknown'),
                 'thumbnail': info.get('thumbnail'),
                 'duration': info.get('duration'),
                 'uploader': info.get('uploader', 'Unknown'),
-                'formats': formats[:10]  # Limit to top 10 qualities
+                'formats': formats  # Return all formats
             }
 
     except yt_dlp.utils.DownloadError as e:
+        print(f"DownloadError: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Invalid YouTube URL or video unavailable: {str(e)}")
     except Exception as e:
+        print(f"Error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error processing video: {str(e)}")
 
 @app.post("/api/download")
 async def download_video(request: DownloadRequest):
     """Download video in specified quality"""
     try:
+        print(f"\n=== Download Request ===")
+        print(f"URL: {request.url}")
+        print(f"Format ID: {request.format_id}")
+
         # Clean old files before downloading new one
         clean_old_files()
 
@@ -132,52 +153,72 @@ async def download_video(request: DownloadRequest):
         unique_id = str(uuid.uuid4())[:8]
 
         ydl_opts = {
-            'format': f'{request.format_id}+bestaudio/best',  # Download video + best audio
+            'format': f'{request.format_id}+bestaudio[ext=m4a]/bestaudio/best',
             'outtmpl': str(DOWNLOAD_DIR / f'{unique_id}_%(title)s.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'merge_output_format': 'mp4',  # Merge to mp4
+            'quiet': False,
+            'no_warnings': False,
+            'merge_output_format': 'mp4',
+            'postprocessors': [{
+                'key': 'FFmpegVideoConvertor',
+                'preferedformat': 'mp4',
+            }],
         }
 
+        print(f"Download options: {ydl_opts}")
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            print("Starting download...")
             info = ydl.extract_info(request.url, download=True)
 
             # Find the downloaded file
-            filename = ydl.prepare_filename(info)
+            print(f"Looking for downloaded file...")
+            files = list(DOWNLOAD_DIR.glob(f"{unique_id}_*"))
+            print(f"Found files: {files}")
 
-            # Handle cases where the extension might be different
-            if not os.path.exists(filename):
-                # Try to find the file with the unique_id
-                files = list(DOWNLOAD_DIR.glob(f"{unique_id}_*"))
-                if files:
-                    filename = str(files[0])
-                else:
-                    raise HTTPException(status_code=500, detail="Downloaded file not found")
-
-            if not os.path.exists(filename):
+            if not files:
                 raise HTTPException(status_code=500, detail="Downloaded file not found")
+
+            filename = str(files[0])
+            print(f"Using file: {filename}")
+
+            if not os.path.exists(filename):
+                raise HTTPException(status_code=500, detail=f"File does not exist: {filename}")
 
             # Get just the filename without path
             file_basename = os.path.basename(filename)
+            print(f"Sending file: {file_basename}")
+
+            # Sanitize filename for HTTP header (remove non-ASCII characters)
+            # Keep the original filename safe for download
+            safe_basename = file_basename.encode('ascii', 'ignore').decode('ascii')
+            if not safe_basename or safe_basename == '':
+                safe_basename = 'video.mp4'
+
+            # Use RFC 5987 encoding for proper Unicode support in Content-Disposition
+            encoded_filename = urllib.parse.quote(file_basename)
+
+            print(f"Safe filename for header: {safe_basename}")
 
             return FileResponse(
                 path=filename,
-                filename=file_basename,
                 media_type='video/mp4',
                 headers={
-                    "Content-Disposition": f'attachment; filename="{file_basename}"'
+                    "Content-Disposition": f"attachment; filename=\"{safe_basename}\"; filename*=UTF-8''{encoded_filename}"
                 }
             )
 
     except yt_dlp.utils.DownloadError as e:
-        raise HTTPException(status_code=400, detail=f"Download failed: {str(e)}")
+        error_msg = f"Download failed: {str(e)}"
+        print(f"ERROR: {error_msg}")
+        raise HTTPException(status_code=400, detail=error_msg)
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error downloading video: {str(e)}")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Clean up files on shutdown"""
-    clean_old_files()
+        error_msg = f"Error downloading video: {str(e)}"
+        print(f"ERROR: {error_msg}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=error_msg)
 
 if __name__ == "__main__":
     import uvicorn
