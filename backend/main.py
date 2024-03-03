@@ -95,7 +95,17 @@ async def get_video_info(video: VideoURL):
 
                 # Prefer combined formats (video+audio) over video-only for the same resolution
                 if height not in seen_resolutions or (acodec != 'none' and seen_resolutions[height].get('has_audio') == False):
+                    # Get file size with multiple fallbacks
                     filesize = f.get('filesize') or f.get('filesize_approx', 0)
+
+                    # If no filesize, estimate based on bitrate and duration
+                    if not filesize:
+                        tbr = f.get('tbr') or f.get('vbr', 0)  # Total bitrate or video bitrate
+                        duration = info.get('duration', 0)
+                        if tbr and duration:
+                            # Estimate: (bitrate in kbps * duration in seconds) / 8 = size in KB
+                            filesize = int((tbr * duration * 1000) / 8)
+
                     has_audio = acodec != 'none'
 
                     seen_resolutions[height] = {
@@ -103,17 +113,19 @@ async def get_video_info(video: VideoURL):
                         'resolution': f"{height}p",
                         'ext': ext if ext != 'unknown' else 'mp4',
                         'filesize': filesize,
-                        'filesize_mb': round(filesize / (1024 * 1024), 2) if filesize else None,
+                        'filesize_mb': round(filesize / (1024 * 1024), 2) if filesize and filesize > 0 else None,
                         'fps': f.get('fps'),
                         'vcodec': vcodec[:20] if vcodec else 'unknown',
-                        'has_audio': has_audio
+                        'has_audio': has_audio,
+                        'tbr': f.get('tbr'),  # Include bitrate for reference
                     }
 
-            # Convert to list and remove the has_audio flag
+            # Convert to list and remove internal flags
             formats = []
             for height, fmt_data in seen_resolutions.items():
                 fmt = dict(fmt_data)
                 fmt.pop('has_audio', None)  # Remove internal flag
+                fmt.pop('tbr', None)  # Remove internal bitrate info
                 formats.append(fmt)
 
             # Sort by resolution (height) in descending order
@@ -121,7 +133,8 @@ async def get_video_info(video: VideoURL):
 
             print(f"\n=== Found {len(formats)} unique resolutions ===")
             for fmt in formats:
-                print(f"  {fmt['resolution']}: format_id={fmt['format_id']}, {fmt['ext']}")
+                size_info = f"{fmt['filesize_mb']} MB" if fmt.get('filesize_mb') else "Size unknown"
+                print(f"  {fmt['resolution']}: format_id={fmt['format_id']}, {fmt['ext']}, {size_info}")
 
             return {
                 'title': info.get('title', 'Unknown'),

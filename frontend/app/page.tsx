@@ -31,6 +31,7 @@ export default function Home() {
   const [videoInfo, setVideoInfo] = useState<VideoInfo | null>(null)
   const [error, setError] = useState('')
   const [downloading, setDownloading] = useState(false)
+  const [downloadProgress, setDownloadProgress] = useState(0)
   const [selectedFormat, setSelectedFormat] = useState('')
 
   const fetchVideoInfo = async () => {
@@ -71,6 +72,7 @@ export default function Home() {
     if (!selectedFormat || !url) return
 
     setDownloading(true)
+    setDownloadProgress(0)
     setError('')
 
     try {
@@ -83,6 +85,13 @@ export default function Home() {
         {
           responseType: 'blob',
           timeout: 300000, // 5 minutes timeout
+          onDownloadProgress: (progressEvent) => {
+            if (progressEvent.total) {
+              const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total)
+              setDownloadProgress(percentCompleted)
+              console.log(`Download progress: ${percentCompleted}%`)
+            }
+          }
         }
       )
 
@@ -107,10 +116,13 @@ export default function Home() {
       link.click()
       document.body.removeChild(link)
       window.URL.revokeObjectURL(downloadUrl)
+
+      setDownloadProgress(100)
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to download video')
     } finally {
       setDownloading(false)
+      setTimeout(() => setDownloadProgress(0), 2000) // Reset progress after 2 seconds
     }
   }
 
@@ -230,8 +242,12 @@ export default function Home() {
                               {format.ext}
                             </span>
                           </div>
-                          <div className="text-sm text-gray-600">
-                            {format.filesize_mb ? `${format.filesize_mb} MB` : 'Size unknown'}
+                          <div className="text-sm text-gray-600 font-medium">
+                            {format.filesize_mb ? (
+                              format.filesize_mb > 0 ? `${format.filesize_mb} MB` : 'Size unknown'
+                            ) : (
+                              <span className="text-gray-400">Size unknown</span>
+                            )}
                           </div>
                           {format.fps && (
                             <div className="text-xs text-gray-500">
@@ -251,6 +267,22 @@ export default function Home() {
                   </div>
                 </div>
 
+                {/* Download Progress Bar */}
+                {downloading && downloadProgress > 0 && (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-gray-700 font-medium">Downloading video...</span>
+                      <span className="text-blue-600 font-bold">{downloadProgress}%</span>
+                    </div>
+                    <div className="w-full bg-gray-200 rounded-full h-3 overflow-hidden">
+                      <div
+                        className="bg-gradient-to-r from-blue-500 to-green-500 h-3 rounded-full transition-all duration-300 ease-out"
+                        style={{ width: `${downloadProgress}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+
                 <button
                   onClick={downloadVideo}
                   disabled={downloading || !selectedFormat}
@@ -262,7 +294,7 @@ export default function Home() {
                         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                       </svg>
-                      Downloading...
+                      {downloadProgress > 0 ? `Downloading... ${downloadProgress}%` : 'Preparing download...'}
                     </span>
                   ) : (
                     'Download Video'
